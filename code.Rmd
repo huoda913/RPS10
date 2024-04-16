@@ -1,0 +1,268 @@
+---
+title: "code"
+output: pdf_document
+date: "2024-04-11"
+---
+```{r}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+
+# Install all required packages
+
+## if (!require("BiocManager", quietly = TRUE))
+## install.packages("BiocManager")
+## BiocManager::install(version = "3.17")
+## BiocManager::install('enrichplot')
+## BiocManager::install('clusterProfiler')
+## BiocManager::install("org.At.tair.db")
+## BiocManager::install("bitops")
+## BiocManager::install("RCurl")
+## BiocManager::install("stringr")
+## BiocManager::install("XML")
+## BiocManager::install("writexl")
+## BiocManager::install("fmsb")
+## BiocManager::install("GOplot")
+## BiocManager::install("org.Hs.eg.db")
+## BiocManager::install("biomaRt")
+## BiocManager::install("STRINGdb")
+## BiocManager::install("KEGGREST", force = TRUE)
+## BiocManager::install("edgeR")
+
+# Load packages
+library(tximport)
+library(tidyverse)
+library(cowplot)
+library(plotly)
+library(pheatmap)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(clusterProfiler)
+library(org.At.tair.db)
+library(writexl)
+library(bitops)
+library(RCurl)
+library(stringr)
+library(XML)
+library(enrichplot)
+library(ggrepel)
+library(fmsb)
+library(GOplot)
+library(org.Hs.eg.db)
+library(biomaRt)
+library(STRINGdb)
+library(igraph)
+library(KEGGREST)
+library(edgeR)
+theme_set(theme_cowplot())
+
+# Load data
+raw_ribo <- read.csv(
+    "ribo_seq.csv", 
+    header = TRUE
+  ) %>% 
+  column_to_rownames(var = 'X')
+
+# Expression analysis
+group_list <- factor(c(rep("WT",1),rep("P3",1)))
+exp_data <- DGEList(counts = raw_ribo, group = group_list)
+bcv <- 0.1
+et <- exactTest(exp_data, dispersion = bcv^2)
+DEG_edgeR <- as.data.frame(topTags(et, n = nrow(exp_data)))
+
+# Select significant genes
+de_gene <- data.frame(DEG_edgeR) %>% 
+  filter(PValue < 0.05 & abs(logFC) >= 1) %>% 
+  rownames_to_column(var = "SYMBOL")
+
+# Volcano plot
+de_gene$significant <- as.factor(de_gene$PValue<0.05 & 
+                                   abs(de_gene$logFC) >= 1)
+ggplot(data=de_gene, aes(x=logFC, y =-log10(PValue),color=significant)) +
+  geom_point(alpha=0.8, size=1.2,col="black")+
+  geom_point(data=subset(de_gene, logFC >= 1.5),alpha=0.8, size=1.2,col="red")+
+  geom_point(data=subset(de_gene, logFC <= -1.5),alpha=0.6, size=1.2,col="blue")+
+  labs(x="log2 (fold change)",y="-log10 (PValue)")+
+  theme(plot.title = element_text(hjust = 0.4))+
+  geom_hline(yintercept = -log10(0.05),lty=4,lwd=0.6,alpha=0.8)+
+  geom_vline(xintercept = c(0.5,-0.5),lty=4,lwd=0.6,alpha=0.8)+
+  theme_bw()+
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),   
+        axis.line = element_line(colour = "black")) +
+  geom_point(data=subset(de_gene, abs(logFC) >= 3),alpha=0.8, size=3,col="green")+
+  geom_text_repel(data=subset(de_gene, abs(logFC) > 1), 
+                  aes(label=SYMBOL),col="black",alpha = 0.8)
+
+```
+
+```{r}
+# Find human homologies
+ho_gene <- read.csv("human_homology.csv", header = TRUE)
+gene_name <- as.matrix(ho_gene$ho_SYMBOL)
+ID <- select(org.Hs.eg.db,          
+             keys=gene_name,                     
+             columns=c("GENENAME", "ENTREZID"), 
+             keytype="SYMBOL" )          
+ID <- na.omit(ID) %>% 
+  rownames_to_column() 
+ID <- ID[-2,-1]
+colnames(ID)[1] <- "ho_SYMBOL"
+ID <- inner_join(ho_gene, ID , by = "ho_SYMBOL")
+de_data <- inner_join(de_gene, ID, by = "SYMBOL")
+```
+
+```{r}
+# cellular component
+if(T){
+  ego_CC <- enrichGO(gene = de_data$ENTREZID,
+                     OrgDb= org.Hs.eg.db,
+                     ont = "CC",
+                     pAdjustMethod = "BH",
+                     minGSSize = 1,
+                     pvalueCutoff = 0.01,
+                     qvalueCutoff = 0.01,
+                     readable = TRUE)
+}
+
+## If needed, please run:
+## .rs.restartR()
+
+genedata<-data.frame(ID=de_data$ho_SYMBOL,logFC=de_data$logFC)
+cc <- ego_CC@result
+cc <- rownames_to_column(cc)
+cc <- cc[,-1]
+GOplotIn_CC<-cc[1:12,c(1,2,6,8)]
+GOplotIn_CC$geneID <-str_replace_all(GOplotIn_CC$geneID,'/',',')
+names(GOplotIn_CC)<-c('ID','Term','adj_pval','Genes')
+GOplotIn_CC$Category = "CC"
+circ_CC<-GOplot::circle_dat(GOplotIn_CC,genedata) 
+GOCircle(circ_CC)
+
+## save(ego_CC,file="ego_CC.Rdata")
+## load(file = "ego_CC.Rdata")
+```
+
+```{r}
+# biological process
+bp <- de_data
+bp$group <- ''
+bp$group <- ifelse(bp$logFC >0,'up','down')
+bp_group <- data.frame(gene=bp$ho_SYMBOL, group=bp$group)
+colnames(bp_group)[1] <- "SYMBOL"
+Entrez <- data.frame(SYMBOL=bp$ho_SYMBOL, ENTREZID=bp$ENTREZID)
+data <- inner_join(bp_group, Entrez, by = "SYMBOL")
+data_GO <- compareCluster(ENTREZID~group, data=data, fun="enrichGO", 
+                          OrgDb="org.Hs.eg.db",ont = "BP",pAdjustMethod = "BH",
+                          pvalueCutoff = 0.05,qvalueCutoff = 0.1)
+data_GO_sim <- clusterProfiler::simplify(data_GO,cutoff=0.7, by="p.adjust", select_fun=min)
+GO_result <- data_GO_sim@compareClusterResult
+help <- GO_result %>% 
+  group_by(Cluster) %>% 
+  do(head(., n=8))
+df <- as.data.frame(help)
+df1 <- df[, c("group","ID","p.adjust")]
+df1<-spread(df1, ID, p.adjust)
+df1[is.na(df1)] <-  1
+rownames(df1) <- df1[,1]
+df1 <- df1[,-1]
+df1 <- -log(df1)
+df1 <- t(df1)
+df1 <- as.data.frame(df1)
+df1 <- arrange(df1,df1$down,df1$up)
+df1 <- t(df1)
+df1 <- as.data.frame(df1)
+my.data <- matrix( c(rep(max(df1),ncol(df1)), 
+                     rep(0, ncol(df1)), 
+                     rep(-log(0.05), ncol(df1))), nrow = 3, ncol = ncol(df1), byrow=TRUE)
+colnames(my.data) <- colnames(df1)
+rownames(my.data) <- c("max", "min", "p")
+my.data <- rbind(my.data, df1)
+my.data <- my.data[c(1,2,4,5,3),]
+annotation_table <- df[,c("ID", "Description")]
+radarchart(my.data, 
+           pty = c(16,16,32),
+           axistype = 1,
+           pcol = c("#64299C", "#0439FD","black"), 
+           pfcol = c(scales::alpha(c("#64299C", "#0439FD","black"), c(0.5, 0.5, 0.5))),
+           plwd = c(3,3,3),
+           plty = 1,
+           cglcol = "grey60", 
+           cglty = 1, 
+           cglwd = 1,
+           axislabcol = "grey60",
+           vlcex = 0.8, 
+           vlabels = colnames(colnames(my.data)),
+           caxislabels = c(0, 10, 20, 30, 40),
+           calcex=0.8)
+legend(x = "bottomright", legend = c("Down","Up"), horiz = F,
+       bty = "n", pch = 15 , col = c("#64299C", "#0439FD"),
+       text.col = "black", cex = 1, pt.cex = 1.5)
+legend(x = "center", legend = c("p<0.05"), horiz = TRUE,
+       text.col = "white", cex = 1,bg=NULL,box.lty=0)
+style  <- ttheme_default(
+  core=list(bg_params = list(fill = c(rep("grey95", 20), col=NA))))
+p1 <- grid.arrange(tableGrob(annotation_table,rows = NULL,theme=style),nrow=1)
+```
+
+```{r}
+# molecular function
+if(T){
+  ego_MF <- enrichGO(gene = de_data$ENTREZID,
+                     OrgDb= org.Hs.eg.db,
+                     ont = "MF",
+                     pAdjustMethod = "BH",
+                     minGSSize = 1,
+                     pvalueCutoff = 0.01,
+                     qvalueCutoff = 0.01,
+                     readable = TRUE)
+}
+
+cnetplot(ego_MF, showCategory= 5, foldChange= de_data$logFC,  colorEdge="TRUE")
+
+## save(ego_MF,file="ego_MF.Rdata")
+## load(file = "ego_MF.Rdata")
+```
+
+```{r}
+# KEGG
+if(T){
+  EGG <- enrichKEGG(gene= de_data$ENTREZID,
+                    organism     = 'hsa',
+                    pvalueCutoff = 0.05)
+}
+
+if(T){
+  x = EGG
+  df = data.frame(x)
+  x@result$richFactor =x@result$Count / as.numeric(sub("/\\d+", "", x@result$BgRatio))
+  y =x@result
+  library(dplyr)
+  library(ggplot2)
+  showCategory = 20
+  y %>% 
+    arrange(p.adjust) %>%
+    dplyr::slice(1:showCategory) %>% 
+    ggplot(aes(richFactor,forcats::fct_reorder(Description, richFactor))) + 
+    geom_segment(aes(xend=0, yend = Description)) +
+    geom_point(aes(color=p.adjust, size = Count)) +
+    scale_color_viridis_c(begin = 0.3, end = 1) +
+    scale_size_continuous(range=c(2, 10)) +
+    theme_minimal() + 
+    xlab("rich factor") +
+    ylab(NULL) + 
+    ggtitle("")
+}
+
+## save(EGG,file="EGG.Rdata")
+## load(file = "EGG.Rdata")
+```
+
+```{r}
+# Check the pathway on KEGG
+human_path <- EGG@result
+browseKEGG(EGG, 'hsa05415') # Diabetic cardiomyopathy
+browseKEGG(EGG, 'hsa05012') # Parkinson disease
+```
+
